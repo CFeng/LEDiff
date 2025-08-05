@@ -13,8 +13,8 @@
 
 ## 📖 <span style="background-color:#f0f0f0; padding:4px 8px; border-radius:6px;">Introduction</span>
 LEDiff is a latent diffusion framework for high dynamic range (HDR) image generation.  
-The method builds on the [Hugging Face diffusers](https://huggingface.co/docs/diffusers/index) library and adapts exposure-aware latent modeling for robust HDR synthesis.  
-It achieves high fidelity in both shadow and highlight regions while remaining efficient for fine-tuning with limited data.
+The method builds on the [Hugging Face diffusers](https://huggingface.co/docs/diffusers/index) library and adapts exposure-aware latent fusion for robust HDR synthesis.  
+It achieves high fidelity in both shadow and highlight regions while remaining efficient for fine-tuning with limited HDR data.
 
 ---
 
