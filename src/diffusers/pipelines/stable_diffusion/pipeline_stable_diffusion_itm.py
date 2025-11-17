@@ -1239,7 +1239,7 @@ class StableDiffusionITMPipeline(
 
         if not output_type == "latent":
             
-            pretrained_model_path = "/HPS/RawDiff/work/LED/sd_model/vae/merge_model.pth"#"/sensei-fs/users/wchao/Codes/diffusers/resutls/sd_model/StabelDiffusion_weights/vae/merge_model.pth"
+            pretrained_model_path = "../LEDiff_data/models/model_highlight/vae/merge_model.pth"#"/sensei-fs/users/wchao/Codes/diffusers/resutls/sd_model/StabelDiffusion_weights/vae/merge_model.pth"
 
             # 实例化 FeatureFusion 类
             net = FeatureFusion(in_channels=4, kernel_size=1, padding=0).to(device)

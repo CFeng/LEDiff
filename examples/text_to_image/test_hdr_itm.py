@@ -111,7 +111,7 @@ def main():
         out_name = str(Path(output_hdr_path) / f"hdr_itm_{idx:03d}.hdr")
         cv2.imwrite(out_name, hdr_bgr)
 
-        print(f"Saved {out_name} in {dt:.2f}s")
+        print(f"Saved {out_name}")
 
     print("All done.")
 
