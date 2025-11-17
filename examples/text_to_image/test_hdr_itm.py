@@ -108,6 +108,8 @@ def main():
 
         hdr = np.exp(result[1])
         hdr_bgr = cv2.cvtColor(hdr.astype(np.float32), cv2.COLOR_RGB2BGR)
+        # [Cheng] resize to equirect size (width == height * 2)
+        hdr_bgr = cv2.resize(hdr_bgr, (hdr_bgr.shape[0] * 2, hdr_bgr.shape[1]), interpolation=cv2.INTER_CUBIC)
         out_name = str(Path(output_hdr_path) / f"hdr_itm_{idx:03d}.hdr")
         cv2.imwrite(out_name, hdr_bgr)
 
