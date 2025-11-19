@@ -1,28 +1,40 @@
-import os
 import argparse
-from pathlib import Path
+import os
 import time
+from pathlib import Path
 
 import cv2
 import numpy as np
 import torch
 from diffusers import StableDiffusionITMPipeline
 from scipy.optimize import least_squares
+
 # import torchprofile  # 未使用可按需开启
 
 
 def parse_args():
     parser = argparse.ArgumentParser(description="ITM HDR inference with LEDiff")
-    parser.add_argument("--model_path", type=str, required=True, help="Path to pretrained model")
-    parser.add_argument("--image_folder", type=str, required=True, help="Folder with input LDR images")
-    parser.add_argument("--output_hdr_path", type=str, required=True, help="Folder to save output HDR results")
-    parser.add_argument("--seed", type=int, default=42, help="Random seed for generation")
+    parser.add_argument(
+        "--model_path", type=str, required=True, help="Path to pretrained model"
+    )
+    parser.add_argument(
+        "--image_folder", type=str, required=True, help="Folder with input LDR images"
+    )
+    parser.add_argument(
+        "--output_hdr_path",
+        type=str,
+        required=True,
+        help="Folder to save output HDR results",
+    )
+    parser.add_argument(
+        "--seed", type=int, default=42, help="Random seed for generation"
+    )
     return parser.parse_args()
 
 
 def hdr_luminance_model(params, ldr_non_overexposed, hdr_non_overexposed):
     gamma, exp = params
-    hdr_estimated = (ldr_non_overexposed ** gamma) * 2 ** exp
+    hdr_estimated = (ldr_non_overexposed**gamma) * 2**exp
     return hdr_estimated - hdr_non_overexposed
 
 
@@ -41,7 +53,7 @@ def optimize_gamma_exp(LDR, HDR, mask, threshold):
 
 
 def apply_gamma_exp(LDR, gamma, exp):
-    return (LDR ** gamma) * 2 ** exp
+    return (LDR**gamma) * 2**exp
 
 
 def blend_images(LDR, HDR, mask):
@@ -59,13 +71,17 @@ def generate_soft_mask(y, thr=0.05):
 
 def process_and_save(LDR_path, HDR_path, output_path, threshold=250):
     LDR = cv2.imread(LDR_path).astype(np.float32) / 255.0
-    HDR = cv2.imread(HDR_path, cv2.IMREAD_ANYDEPTH | cv2.IMREAD_COLOR).astype(np.float32)
+    HDR = cv2.imread(HDR_path, cv2.IMREAD_ANYDEPTH | cv2.IMREAD_COLOR).astype(
+        np.float32
+    )
     print("max HDR is", np.max(HDR))
 
     overexposed_mask = generate_soft_mask(LDR)
     non_overexposed_mask = 1 - overexposed_mask
 
-    optimal_gamma, optimal_exp = optimize_gamma_exp(LDR, HDR, non_overexposed_mask, threshold)
+    optimal_gamma, optimal_exp = optimize_gamma_exp(
+        LDR, HDR, non_overexposed_mask, threshold
+    )
     LDR_adjusted = apply_gamma_exp(LDR, optimal_gamma, optimal_exp)
     blended_img = blend_images(LDR_adjusted, HDR, non_overexposed_mask)
 
@@ -83,7 +99,9 @@ def main():
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    pipe = StableDiffusionITMPipeline.from_pretrained(model_path, torch_dtype=torch.float32)
+    pipe = StableDiffusionITMPipeline.from_pretrained(
+        model_path, torch_dtype=torch.float32
+    )
     pipe.to(device)
 
     captions = [
@@ -95,7 +113,9 @@ def main():
     ]
 
     in_dir = Path(image_folder)
-    image_files = sorted([p for p in in_dir.iterdir() if p.suffix.lower() in [".jpg", ".jpeg", ".png"]])
+    image_files = sorted(
+        [p for p in in_dir.iterdir() if p.suffix.lower() in [".jpg", ".jpeg", ".png"]]
+    )
     print("image_files are", [p.name for p in image_files])
 
     os.makedirs(output_hdr_path, exist_ok=True)
@@ -104,13 +124,22 @@ def main():
         str_prompt = captions[idx % len(captions)]
         npy_save_name = str(Path(output_hdr_path) / f"img_{idx:03d}")
 
-        result = pipe(prompt=str_prompt, img_name=str(img_path), npy_save_name=npy_save_name, seed=seed).images
+        result = pipe(
+            prompt=str_prompt,
+            img_name=str(img_path),
+            npy_save_name=npy_save_name,
+            seed=seed,
+        ).images
 
         hdr = np.exp(result[1])
         hdr_bgr = cv2.cvtColor(hdr.astype(np.float32), cv2.COLOR_RGB2BGR)
         # [Cheng] resize to equirect size (width == height * 2)
-        hdr_bgr = cv2.resize(hdr_bgr, (hdr_bgr.shape[0] * 2, hdr_bgr.shape[1]), interpolation=cv2.INTER_CUBIC)
-        out_name = str(Path(output_hdr_path) / f"hdr_itm_{idx:03d}.hdr")
+        hdr_bgr = cv2.resize(
+            hdr_bgr,
+            (hdr_bgr.shape[0] * 2, hdr_bgr.shape[1]),
+            interpolation=cv2.INTER_CUBIC,
+        )
+        out_name = str(Path(output_hdr_path) / f"exr_{idx:03d}.exr")
         cv2.imwrite(out_name, hdr_bgr)
 
         print(f"Saved {out_name}")

@@ -12,7 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import inspect
+import os
 from typing import Any, Callable, Dict, List, Optional, Union
+
 import numpy as np
 
 import torch
@@ -20,29 +22,39 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.utils.checkpoint
 from packaging import version
-from transformers import CLIPImageProcessor, CLIPTextModel, CLIPTokenizer, CLIPVisionModelWithProjection
+from transformers import (
+    CLIPImageProcessor,
+    CLIPTextModel,
+    CLIPTokenizer,
+    CLIPVisionModelWithProjection,
+)
 
 from ...callbacks import MultiPipelineCallbacks, PipelineCallback
 from ...configuration_utils import FrozenDict
 from ...image_processor import PipelineImageInput, VaeImageProcessor
-from ...loaders import FromSingleFileMixin, IPAdapterMixin, LoraLoaderMixin, TextualInversionLoaderMixin
+from ...loaders import (
+    FromSingleFileMixin,
+    IPAdapterMixin,
+    LoraLoaderMixin,
+    TextualInversionLoaderMixin,
+)
 from ...models import AutoencoderKL, ImageProjection, UNet2DConditionModel
 from ...models.lora import adjust_lora_scale_text_encoder
 from ...schedulers import KarrasDiffusionSchedulers
 from ...utils import (
-    USE_PEFT_BACKEND,
     deprecate,
     logging,
     replace_example_docstring,
     scale_lora_layers,
     unscale_lora_layers,
+    USE_PEFT_BACKEND,
 )
 from ...utils.torch_utils import randn_tensor
 from ..pipeline_utils import DiffusionPipeline, StableDiffusionMixin
 from .pipeline_output import StableDiffusionPipelineOutput
 from .safety_checker import StableDiffusionSafetyChecker
-import os
-os.environ["OPENCV_IO_ENABLE_OPENEXR"]="1"
+
+os.environ["OPENCV_IO_ENABLE_OPENEXR"] = "1"
 import cv2
 
 
@@ -68,12 +80,16 @@ def rescale_noise_cfg(noise_cfg, noise_pred_text, guidance_rescale=0.0):
     Rescale `noise_cfg` according to `guidance_rescale`. Based on findings of [Common Diffusion Noise Schedules and
     Sample Steps are Flawed](https://arxiv.org/pdf/2305.08891.pdf). See Section 3.4
     """
-    std_text = noise_pred_text.std(dim=list(range(1, noise_pred_text.ndim)), keepdim=True)
+    std_text = noise_pred_text.std(
+        dim=list(range(1, noise_pred_text.ndim)), keepdim=True
+    )
     std_cfg = noise_cfg.std(dim=list(range(1, noise_cfg.ndim)), keepdim=True)
     # rescale the results from guidance (fixes overexposure)
     noise_pred_rescaled = noise_cfg * (std_text / std_cfg)
     # mix with the original results from guidance by factor guidance_rescale to avoid "plain looking" images
-    noise_cfg = guidance_rescale * noise_pred_rescaled + (1 - guidance_rescale) * noise_cfg
+    noise_cfg = (
+        guidance_rescale * noise_pred_rescaled + (1 - guidance_rescale) * noise_cfg
+    )
     return noise_cfg
 
 
@@ -109,9 +125,13 @@ def retrieve_timesteps(
         second element is the number of inference steps.
     """
     if timesteps is not None and sigmas is not None:
-        raise ValueError("Only one of `timesteps` or `sigmas` can be passed. Please choose one to set custom values")
+        raise ValueError(
+            "Only one of `timesteps` or `sigmas` can be passed. Please choose one to set custom values"
+        )
     if timesteps is not None:
-        accepts_timesteps = "timesteps" in set(inspect.signature(scheduler.set_timesteps).parameters.keys())
+        accepts_timesteps = "timesteps" in set(
+            inspect.signature(scheduler.set_timesteps).parameters.keys()
+        )
         if not accepts_timesteps:
             raise ValueError(
                 f"The current scheduler class {scheduler.__class__}'s `set_timesteps` does not support custom"
@@ -121,7 +141,9 @@ def retrieve_timesteps(
         timesteps = scheduler.timesteps
         num_inference_steps = len(timesteps)
     elif sigmas is not None:
-        accept_sigmas = "sigmas" in set(inspect.signature(scheduler.set_timesteps).parameters.keys())
+        accept_sigmas = "sigmas" in set(
+            inspect.signature(scheduler.set_timesteps).parameters.keys()
+        )
         if not accept_sigmas:
             raise ValueError(
                 f"The current scheduler class {scheduler.__class__}'s `set_timesteps` does not support custom"
@@ -134,6 +156,7 @@ def retrieve_timesteps(
         scheduler.set_timesteps(num_inference_steps, device=device, **kwargs)
         timesteps = scheduler.timesteps
     return timesteps, num_inference_steps
+
 
 def generate_sinusoid_tensor_from_latent(latent, frequency=1.0, amplitude=1.0):
     """
@@ -164,38 +187,50 @@ def generate_sinusoid_tensor_from_latent(latent, frequency=1.0, amplitude=1.0):
 
     return sinusoid_tensor
 
+
 def preprocess_image(image_path, device=None):
     # 读入图像
     image = cv2.imread(image_path, cv2.IMREAD_UNCHANGED)
-    
+
     # 转换到 RGB 色彩空间 (OpenCV 默认读入的是 BGR)
     image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-    
+
     # 调整大小到 512x512
     image_resized = cv2.resize(image_rgb, (512, 512))
-    
+
     # 归一化到 [-1, 1]
     image_normalized = (image_resized / 127.5) - 1.0
-    
+
     # 转换为 PyTorch Tensor 并在前面增加一维 batch
-    image_tensor = torch.tensor(image_normalized, dtype=torch.float32).permute(2, 0, 1).unsqueeze(0)
-    
+    image_tensor = (
+        torch.tensor(image_normalized, dtype=torch.float32)
+        .permute(2, 0, 1)
+        .unsqueeze(0)
+    )
+
     # 如果未指定设备，则自动选择 GPU (如果可用) 或 CPU
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    
+
     # 将张量放到指定设备
     image_tensor = image_tensor.to(device)
-    
+
     return image_tensor
+
 
 class FeatureFusion(nn.Module):
     def __init__(self, in_channels=4, kernel_size=1, padding=0):
         super(FeatureFusion, self).__init__()
         # 定义逐通道卷积层
-        self.weight_conv = nn.Conv2d(in_channels, in_channels, kernel_size=kernel_size, 
-                                     padding=padding, bias=True, groups=in_channels)
-        
+        self.weight_conv = nn.Conv2d(
+            in_channels,
+            in_channels,
+            kernel_size=kernel_size,
+            padding=padding,
+            bias=True,
+            groups=in_channels,
+        )
+
         # 初始化权重
         self.initialize_weights()
 
@@ -204,31 +239,33 @@ class FeatureFusion(nn.Module):
             # 初始化卷积核为零
             self.weight_conv.weight.zero_()
             # 设置偏置项为 1/3，使得初始权重为 1/3
-            self.weight_conv.bias.data.fill_(1/3)
-    
+            self.weight_conv.bias.data.fill_(1 / 3)
+
     def forward(self, feature_1, feature_2, feature_3):
         # 通过逐通道卷积层分别生成每个通道的权重映射
         weight1 = self.weight_conv(feature_1)  # (N, C, H, W)
         weight2 = self.weight_conv(feature_2)  # (N, C, H, W)
         weight3 = self.weight_conv(feature_3)  # (N, C, H, W)
-        
+
         # 将每个通道的权重映射合并
         weights = torch.stack([weight1, weight2, weight3], dim=2)  # (N, C, 3, H, W)
-        
+
         # 在每个通道组的维度上进行 softmax，确保每个通道的权重和为 1
         weights = F.softmax(weights, dim=2)  # 在第2个维度进行 softmax (通道组维度)
-        
+
         # weight_sum_per_channel = weights.sum(dim=2)  # (N, C, H, W)
         # print("Sum of weights per channel (should be 1 for each channel):")
         # print(weight_sum_per_channel)  # 打印每个通道的权重之和
 
         # 逐通道加权融合特征图
-        feature_merge = (weights[:, :, 0, :, :] * feature_1 +
-                         weights[:, :, 1, :, :] * feature_2 +
-                         weights[:, :, 2, :, :] * feature_3)
+        feature_merge = (
+            weights[:, :, 0, :, :] * feature_1
+            + weights[:, :, 1, :, :] * feature_2
+            + weights[:, :, 2, :, :] * feature_3
+        )
 
         return feature_merge, weights
-    
+
     def load_pretrained_weights(self, pretrained_model_path, device):
         # 从预训练模型中加载权重
         state_dict = torch.load(pretrained_model_path, map_location=device)
@@ -296,7 +333,10 @@ class StableDiffusionITMPipeline(
     ):
         super().__init__()
 
-        if hasattr(scheduler.config, "steps_offset") and scheduler.config.steps_offset != 1:
+        if (
+            hasattr(scheduler.config, "steps_offset")
+            and scheduler.config.steps_offset != 1
+        ):
             deprecation_message = (
                 f"The configuration file of this scheduler: {scheduler} is outdated. `steps_offset`"
                 f" should be set to 1 instead of {scheduler.config.steps_offset}. Please make sure "
@@ -305,12 +345,17 @@ class StableDiffusionITMPipeline(
                 " it would be very nice if you could open a Pull request for the `scheduler/scheduler_config.json`"
                 " file"
             )
-            deprecate("steps_offset!=1", "1.0.0", deprecation_message, standard_warn=False)
+            deprecate(
+                "steps_offset!=1", "1.0.0", deprecation_message, standard_warn=False
+            )
             new_config = dict(scheduler.config)
             new_config["steps_offset"] = 1
             scheduler._internal_dict = FrozenDict(new_config)
 
-        if hasattr(scheduler.config, "clip_sample") and scheduler.config.clip_sample is True:
+        if (
+            hasattr(scheduler.config, "clip_sample")
+            and scheduler.config.clip_sample is True
+        ):
             deprecation_message = (
                 f"The configuration file of this scheduler: {scheduler} has not set the configuration `clip_sample`."
                 " `clip_sample` should be set to False in the configuration file. Please make sure to update the"
@@ -318,7 +363,9 @@ class StableDiffusionITMPipeline(
                 " future versions. If you have downloaded this checkpoint from the Hugging Face Hub, it would be very"
                 " nice if you could open a Pull request for the `scheduler/scheduler_config.json` file"
             )
-            deprecate("clip_sample not set", "1.0.0", deprecation_message, standard_warn=False)
+            deprecate(
+                "clip_sample not set", "1.0.0", deprecation_message, standard_warn=False
+            )
             new_config = dict(scheduler.config)
             new_config["clip_sample"] = False
             scheduler._internal_dict = FrozenDict(new_config)
@@ -339,10 +386,16 @@ class StableDiffusionITMPipeline(
                 " checker. If you do not want to use the safety checker, you can pass `'safety_checker=None'` instead."
             )
 
-        is_unet_version_less_0_9_0 = hasattr(unet.config, "_diffusers_version") and version.parse(
+        is_unet_version_less_0_9_0 = hasattr(
+            unet.config, "_diffusers_version"
+        ) and version.parse(
             version.parse(unet.config._diffusers_version).base_version
-        ) < version.parse("0.9.0.dev0")
-        is_unet_sample_size_less_64 = hasattr(unet.config, "sample_size") and unet.config.sample_size < 64
+        ) < version.parse(
+            "0.9.0.dev0"
+        )
+        is_unet_sample_size_less_64 = (
+            hasattr(unet.config, "sample_size") and unet.config.sample_size < 64
+        )
         if is_unet_version_less_0_9_0 and is_unet_sample_size_less_64:
             deprecation_message = (
                 "The configuration file of the unet has set the default `sample_size` to smaller than"
@@ -355,7 +408,9 @@ class StableDiffusionITMPipeline(
                 " checkpoint from the Hugging Face Hub, it would be very nice if you could open a Pull request for"
                 " the `unet/config.json` file"
             )
-            deprecate("sample_size<64", "1.0.0", deprecation_message, standard_warn=False)
+            deprecate(
+                "sample_size<64", "1.0.0", deprecation_message, standard_warn=False
+            )
             new_config = dict(unet.config)
             new_config["sample_size"] = 64
             unet._internal_dict = FrozenDict(new_config)
@@ -479,11 +534,13 @@ class StableDiffusionITMPipeline(
                 return_tensors="pt",
             )
             text_input_ids = text_inputs.input_ids
-            untruncated_ids = self.tokenizer(prompt, padding="longest", return_tensors="pt").input_ids
+            untruncated_ids = self.tokenizer(
+                prompt, padding="longest", return_tensors="pt"
+            ).input_ids
 
-            if untruncated_ids.shape[-1] >= text_input_ids.shape[-1] and not torch.equal(
-                text_input_ids, untruncated_ids
-            ):
+            if untruncated_ids.shape[-1] >= text_input_ids.shape[
+                -1
+            ] and not torch.equal(text_input_ids, untruncated_ids):
                 removed_text = self.tokenizer.batch_decode(
                     untruncated_ids[:, self.tokenizer.model_max_length - 1 : -1]
                 )
@@ -492,17 +549,24 @@ class StableDiffusionITMPipeline(
                     f" {self.tokenizer.model_max_length} tokens: {removed_text}"
                 )
 
-            if hasattr(self.text_encoder.config, "use_attention_mask") and self.text_encoder.config.use_attention_mask:
+            if (
+                hasattr(self.text_encoder.config, "use_attention_mask")
+                and self.text_encoder.config.use_attention_mask
+            ):
                 attention_mask = text_inputs.attention_mask.to(device)
             else:
                 attention_mask = None
 
             if clip_skip is None:
-                prompt_embeds = self.text_encoder(text_input_ids.to(device), attention_mask=attention_mask)
+                prompt_embeds = self.text_encoder(
+                    text_input_ids.to(device), attention_mask=attention_mask
+                )
                 prompt_embeds = prompt_embeds[0]
             else:
                 prompt_embeds = self.text_encoder(
-                    text_input_ids.to(device), attention_mask=attention_mask, output_hidden_states=True
+                    text_input_ids.to(device),
+                    attention_mask=attention_mask,
+                    output_hidden_states=True,
                 )
                 # Access the `hidden_states` first, that contains a tuple of
                 # all the hidden states from the encoder layers. Then index into
@@ -512,7 +576,9 @@ class StableDiffusionITMPipeline(
                 # representations. The `last_hidden_states` that we typically use for
                 # obtaining the final prompt representations passes through the LayerNorm
                 # layer.
-                prompt_embeds = self.text_encoder.text_model.final_layer_norm(prompt_embeds)
+                prompt_embeds = self.text_encoder.text_model.final_layer_norm(
+                    prompt_embeds
+                )
 
         if self.text_encoder is not None:
             prompt_embeds_dtype = self.text_encoder.dtype
@@ -526,7 +592,9 @@ class StableDiffusionITMPipeline(
         bs_embed, seq_len, _ = prompt_embeds.shape
         # duplicate text embeddings for each generation per prompt, using mps friendly method
         prompt_embeds = prompt_embeds.repeat(1, num_images_per_prompt, 1)
-        prompt_embeds = prompt_embeds.view(bs_embed * num_images_per_prompt, seq_len, -1)
+        prompt_embeds = prompt_embeds.view(
+            bs_embed * num_images_per_prompt, seq_len, -1
+        )
 
         # get unconditional embeddings for classifier free guidance
         if do_classifier_free_guidance and negative_prompt_embeds is None:
@@ -562,7 +630,10 @@ class StableDiffusionITMPipeline(
                 return_tensors="pt",
             )
 
-            if hasattr(self.text_encoder.config, "use_attention_mask") and self.text_encoder.config.use_attention_mask:
+            if (
+                hasattr(self.text_encoder.config, "use_attention_mask")
+                and self.text_encoder.config.use_attention_mask
+            ):
                 attention_mask = uncond_input.attention_mask.to(device)
             else:
                 attention_mask = None
@@ -577,10 +648,16 @@ class StableDiffusionITMPipeline(
             # duplicate unconditional embeddings for each generation per prompt, using mps friendly method
             seq_len = negative_prompt_embeds.shape[1]
 
-            negative_prompt_embeds = negative_prompt_embeds.to(dtype=prompt_embeds_dtype, device=device)
+            negative_prompt_embeds = negative_prompt_embeds.to(
+                dtype=prompt_embeds_dtype, device=device
+            )
 
-            negative_prompt_embeds = negative_prompt_embeds.repeat(1, num_images_per_prompt, 1)
-            negative_prompt_embeds = negative_prompt_embeds.view(batch_size * num_images_per_prompt, seq_len, -1)
+            negative_prompt_embeds = negative_prompt_embeds.repeat(
+                1, num_images_per_prompt, 1
+            )
+            negative_prompt_embeds = negative_prompt_embeds.view(
+                batch_size * num_images_per_prompt, seq_len, -1
+            )
 
         if self.text_encoder is not None:
             if isinstance(self, LoraLoaderMixin) and USE_PEFT_BACKEND:
@@ -590,7 +667,9 @@ class StableDiffusionITMPipeline(
 
         return prompt_embeds, negative_prompt_embeds
 
-    def encode_image(self, image, device, num_images_per_prompt, output_hidden_states=None):
+    def encode_image(
+        self, image, device, num_images_per_prompt, output_hidden_states=None
+    ):
         dtype = next(self.image_encoder.parameters()).dtype
 
         if not isinstance(image, torch.Tensor):
@@ -598,13 +677,19 @@ class StableDiffusionITMPipeline(
 
         image = image.to(device=device, dtype=dtype)
         if output_hidden_states:
-            image_enc_hidden_states = self.image_encoder(image, output_hidden_states=True).hidden_states[-2]
-            image_enc_hidden_states = image_enc_hidden_states.repeat_interleave(num_images_per_prompt, dim=0)
+            image_enc_hidden_states = self.image_encoder(
+                image, output_hidden_states=True
+            ).hidden_states[-2]
+            image_enc_hidden_states = image_enc_hidden_states.repeat_interleave(
+                num_images_per_prompt, dim=0
+            )
             uncond_image_enc_hidden_states = self.image_encoder(
                 torch.zeros_like(image), output_hidden_states=True
             ).hidden_states[-2]
-            uncond_image_enc_hidden_states = uncond_image_enc_hidden_states.repeat_interleave(
-                num_images_per_prompt, dim=0
+            uncond_image_enc_hidden_states = (
+                uncond_image_enc_hidden_states.repeat_interleave(
+                    num_images_per_prompt, dim=0
+                )
             )
             return image_enc_hidden_states, uncond_image_enc_hidden_states
         else:
@@ -615,7 +700,12 @@ class StableDiffusionITMPipeline(
             return image_embeds, uncond_image_embeds
 
     def prepare_ip_adapter_image_embeds(
-        self, ip_adapter_image, ip_adapter_image_embeds, device, num_images_per_prompt, do_classifier_free_guidance
+        self,
+        ip_adapter_image,
+        ip_adapter_image_embeds,
+        device,
+        num_images_per_prompt,
+        do_classifier_free_guidance,
     ):
         image_embeds = []
         if do_classifier_free_guidance:
@@ -624,7 +714,9 @@ class StableDiffusionITMPipeline(
             if not isinstance(ip_adapter_image, list):
                 ip_adapter_image = [ip_adapter_image]
 
-            if len(ip_adapter_image) != len(self.unet.encoder_hid_proj.image_projection_layers):
+            if len(ip_adapter_image) != len(
+                self.unet.encoder_hid_proj.image_projection_layers
+            ):
                 raise ValueError(
                     f"`ip_adapter_image` must have same length as the number of IP Adapters. Got {len(ip_adapter_image)} images and {len(self.unet.encoder_hid_proj.image_projection_layers)} IP Adapters."
                 )
@@ -643,16 +735,24 @@ class StableDiffusionITMPipeline(
         else:
             for single_image_embeds in ip_adapter_image_embeds:
                 if do_classifier_free_guidance:
-                    single_negative_image_embeds, single_image_embeds = single_image_embeds.chunk(2)
+                    single_negative_image_embeds, single_image_embeds = (
+                        single_image_embeds.chunk(2)
+                    )
                     negative_image_embeds.append(single_negative_image_embeds)
                 image_embeds.append(single_image_embeds)
 
         ip_adapter_image_embeds = []
         for i, single_image_embeds in enumerate(image_embeds):
-            single_image_embeds = torch.cat([single_image_embeds] * num_images_per_prompt, dim=0)
+            single_image_embeds = torch.cat(
+                [single_image_embeds] * num_images_per_prompt, dim=0
+            )
             if do_classifier_free_guidance:
-                single_negative_image_embeds = torch.cat([negative_image_embeds[i]] * num_images_per_prompt, dim=0)
-                single_image_embeds = torch.cat([single_negative_image_embeds, single_image_embeds], dim=0)
+                single_negative_image_embeds = torch.cat(
+                    [negative_image_embeds[i]] * num_images_per_prompt, dim=0
+                )
+                single_image_embeds = torch.cat(
+                    [single_negative_image_embeds, single_image_embeds], dim=0
+                )
 
             single_image_embeds = single_image_embeds.to(device=device)
             ip_adapter_image_embeds.append(single_image_embeds)
@@ -664,10 +764,14 @@ class StableDiffusionITMPipeline(
             has_nsfw_concept = None
         else:
             if torch.is_tensor(image):
-                feature_extractor_input = self.image_processor.postprocess(image, output_type="pil")
+                feature_extractor_input = self.image_processor.postprocess(
+                    image, output_type="pil"
+                )
             else:
                 feature_extractor_input = self.image_processor.numpy_to_pil(image)
-            safety_checker_input = self.feature_extractor(feature_extractor_input, return_tensors="pt").to(device)
+            safety_checker_input = self.feature_extractor(
+                feature_extractor_input, return_tensors="pt"
+            ).to(device)
             image, has_nsfw_concept = self.safety_checker(
                 images=image, clip_input=safety_checker_input.pixel_values.to(dtype)
             )
@@ -690,13 +794,17 @@ class StableDiffusionITMPipeline(
         # eta corresponds to η in DDIM paper: https://arxiv.org/abs/2010.02502
         # and should be between [0, 1]
 
-        accepts_eta = "eta" in set(inspect.signature(self.scheduler.step).parameters.keys())
+        accepts_eta = "eta" in set(
+            inspect.signature(self.scheduler.step).parameters.keys()
+        )
         extra_step_kwargs = {}
         if accepts_eta:
             extra_step_kwargs["eta"] = eta
 
         # check if the scheduler accepts generator
-        accepts_generator = "generator" in set(inspect.signature(self.scheduler.step).parameters.keys())
+        accepts_generator = "generator" in set(
+            inspect.signature(self.scheduler.step).parameters.keys()
+        )
         if accepts_generator:
             extra_step_kwargs["generator"] = generator
         return extra_step_kwargs
@@ -715,15 +823,20 @@ class StableDiffusionITMPipeline(
         callback_on_step_end_tensor_inputs=None,
     ):
         if height % 8 != 0 or width % 8 != 0:
-            raise ValueError(f"`height` and `width` have to be divisible by 8 but are {height} and {width}.")
+            raise ValueError(
+                f"`height` and `width` have to be divisible by 8 but are {height} and {width}."
+            )
 
-        if callback_steps is not None and (not isinstance(callback_steps, int) or callback_steps <= 0):
+        if callback_steps is not None and (
+            not isinstance(callback_steps, int) or callback_steps <= 0
+        ):
             raise ValueError(
                 f"`callback_steps` has to be a positive integer but is {callback_steps} of type"
                 f" {type(callback_steps)}."
             )
         if callback_on_step_end_tensor_inputs is not None and not all(
-            k in self._callback_tensor_inputs for k in callback_on_step_end_tensor_inputs
+            k in self._callback_tensor_inputs
+            for k in callback_on_step_end_tensor_inputs
         ):
             raise ValueError(
                 f"`callback_on_step_end_tensor_inputs` has to be in {self._callback_tensor_inputs}, but found {[k for k in callback_on_step_end_tensor_inputs if k not in self._callback_tensor_inputs]}"
@@ -738,8 +851,12 @@ class StableDiffusionITMPipeline(
             raise ValueError(
                 "Provide either `prompt` or `prompt_embeds`. Cannot leave both `prompt` and `prompt_embeds` undefined."
             )
-        elif prompt is not None and (not isinstance(prompt, str) and not isinstance(prompt, list)):
-            raise ValueError(f"`prompt` has to be of type `str` or `list` but is {type(prompt)}")
+        elif prompt is not None and (
+            not isinstance(prompt, str) and not isinstance(prompt, list)
+        ):
+            raise ValueError(
+                f"`prompt` has to be of type `str` or `list` but is {type(prompt)}"
+            )
 
         if negative_prompt is not None and negative_prompt_embeds is not None:
             raise ValueError(
@@ -770,7 +887,17 @@ class StableDiffusionITMPipeline(
                     f"`ip_adapter_image_embeds` has to be a list of 3D or 4D tensors but is {ip_adapter_image_embeds[0].ndim}D"
                 )
 
-    def prepare_latents(self, batch_size, num_channels_latents, height, width, dtype, device, generator, latents=None):
+    def prepare_latents(
+        self,
+        batch_size,
+        num_channels_latents,
+        height,
+        width,
+        dtype,
+        device,
+        generator,
+        latents=None,
+    ):
         shape = (
             batch_size,
             num_channels_latents,
@@ -784,7 +911,9 @@ class StableDiffusionITMPipeline(
             )
 
         if latents is None:
-            latents = randn_tensor(shape, generator=generator, device=device, dtype=dtype)
+            latents = randn_tensor(
+                shape, generator=generator, device=device, dtype=dtype
+            )
         else:
             latents = latents.to(device)
 
@@ -794,7 +923,10 @@ class StableDiffusionITMPipeline(
 
     # Copied from diffusers.pipelines.latent_consistency_models.pipeline_latent_consistency_text2img.LatentConsistencyModelPipeline.get_guidance_scale_embedding
     def get_guidance_scale_embedding(
-        self, w: torch.Tensor, embedding_dim: int = 512, dtype: torch.dtype = torch.float32
+        self,
+        w: torch.Tensor,
+        embedding_dim: int = 512,
+        dtype: torch.dtype = torch.float32,
     ) -> torch.Tensor:
         """
         See https://github.com/google-research/vdm/blob/dc27b98a554f65cdc654b800da5aa1846545d41b/model_vdm.py#L298
@@ -853,8 +985,6 @@ class StableDiffusionITMPipeline(
     @property
     def interrupt(self):
         return self._interrupt
-    
-
 
     @torch.no_grad()
     @replace_example_docstring(EXAMPLE_DOC_STRING)
@@ -879,13 +1009,17 @@ class StableDiffusionITMPipeline(
         negative_prompt_embeds: Optional[torch.Tensor] = None,
         ip_adapter_image: Optional[PipelineImageInput] = None,
         ip_adapter_image_embeds: Optional[List[torch.Tensor]] = None,
-        output_type: Optional[str] = "np",#"pil",
+        output_type: Optional[str] = "np",  # "pil",
         return_dict: bool = True,
         cross_attention_kwargs: Optional[Dict[str, Any]] = None,
         guidance_rescale: float = 0.0,
         clip_skip: Optional[int] = None,
         callback_on_step_end: Optional[
-            Union[Callable[[int, int, Dict], None], PipelineCallback, MultiPipelineCallbacks]
+            Union[
+                Callable[[int, int, Dict], None],
+                PipelineCallback,
+                MultiPipelineCallbacks,
+            ]
         ] = None,
         callback_on_step_end_tensor_inputs: List[str] = ["latents"],
         **kwargs,
@@ -1034,7 +1168,9 @@ class StableDiffusionITMPipeline(
 
         # 3. Encode input prompt
         lora_scale = (
-            self.cross_attention_kwargs.get("scale", None) if self.cross_attention_kwargs is not None else None
+            self.cross_attention_kwargs.get("scale", None)
+            if self.cross_attention_kwargs is not None
+            else None
         )
         # print('lora scale is cccccc', lora_scale)
 
@@ -1071,12 +1207,16 @@ class StableDiffusionITMPipeline(
         )
 
         # 5. Prepare latent variables
-        num_channels_latents = 4#self.unet.config.in_channels
+        num_channels_latents = 4  # self.unet.config.in_channels
         # latents_np = np.load('/sensei-fs/users/wchao/Codes/diffusers/resutls/test_visualization_rand_render_test_ave/latent_codes_srgb_comparisons_night_scene_cars_5.npy')
         # latents_tensor = torch.from_numpy(latents_np).float().to(device).unsqueeze(0) * self.vae.config.scaling_factor
-        image_tensor = preprocess_image(img_name)#preprocess_image('/HPS/RawDiff/work/LED/over_exposed_images/bulb_1.jpg') #preprocess_image('/sensei-fs/users/wchao/Codes/Ours/over_exposed_images/IMG_6568.JPG', device = device)#preprocess_image('/sensei-fs/users/wchao/Codes/Ours/over_exposed_images/P1011321.JPG', device = device)#
-        latents_tensor = (self.vae.encode(image_tensor).latent_dist.mode()) * self.vae.config.scaling_factor
-        print('latents_code type is', latents_tensor.dtype)
+        image_tensor = preprocess_image(
+            img_name
+        )  # preprocess_image('/HPS/RawDiff/work/LED/over_exposed_images/bulb_1.jpg') #preprocess_image('/sensei-fs/users/wchao/Codes/Ours/over_exposed_images/IMG_6568.JPG', device = device)#preprocess_image('/sensei-fs/users/wchao/Codes/Ours/over_exposed_images/P1011321.JPG', device = device)#
+        latents_tensor = (
+            self.vae.encode(image_tensor).latent_dist.mode()
+        ) * self.vae.config.scaling_factor
+        print("latents_code type is", latents_tensor.dtype)
         # img = torch.from_numpy(img).float().to(device)
         latents = self.prepare_latents(
             batch_size * num_images_per_prompt,
@@ -1088,17 +1228,16 @@ class StableDiffusionITMPipeline(
             generator,
             latents,
         )
-        print('latents shape is', latents.shape)
-        print('latents_tensor shape is', latents_tensor.shape)
-        print('self.unet.config.in_channels are', self.unet.config.in_channels)
+        print("latents shape is", latents.shape)
+        print("latents_tensor shape is", latents_tensor.shape)
+        print("self.unet.config.in_channels are", self.unet.config.in_channels)
         # sin_1 = generate_sinusoid_tensor_from_latent(latents, frequency=2.0, amplitude=2**-3)
         # sin_2 = generate_sinusoid_tensor_from_latent(latents, frequency=2.0, amplitude=2**0)
         # sin_3 = generate_sinusoid_tensor_from_latent(latents, frequency=2.0, amplitude=2**3)
-        
 
         # latent_concat_2 = torch.concat((latents_2, sin_2), dim = 1)
         # latent_concat_3 = torch.concat((latents_3, sin_3), dim = 1)
-        seed = seed + 22#64#10000#
+        seed = seed + 22  # 64#10000#
         torch.manual_seed(seed)
         latents_low = self.prepare_latents(
             batch_size * num_images_per_prompt,
@@ -1108,9 +1247,9 @@ class StableDiffusionITMPipeline(
             prompt_embeds.dtype,
             device,
             generator,
-            latents = None,
+            latents=None,
         )
-      
+
         # 6. Prepare extra step kwargs. TODO: Logic should ideally just be moved out of the pipeline
         extra_step_kwargs = self.prepare_extra_step_kwargs(generator, eta)
 
@@ -1124,7 +1263,9 @@ class StableDiffusionITMPipeline(
         # 6.2 Optionally get Guidance Scale Embedding
         timestep_cond = None
         if self.unet.config.time_cond_proj_dim is not None:
-            guidance_scale_tensor = torch.tensor(self.guidance_scale - 1).repeat(batch_size * num_images_per_prompt)
+            guidance_scale_tensor = torch.tensor(self.guidance_scale - 1).repeat(
+                batch_size * num_images_per_prompt
+            )
             timestep_cond = self.get_guidance_scale_embedding(
                 guidance_scale_tensor, embedding_dim=self.unet.config.time_cond_proj_dim
             ).to(device=device, dtype=latents.dtype)
@@ -1137,10 +1278,16 @@ class StableDiffusionITMPipeline(
             for i, t in enumerate(timesteps):
                 if self.interrupt:
                     continue
-                latent_concat_1 = torch.concat((latents, latents_tensor), dim = 1)
+                latent_concat_1 = torch.concat((latents, latents_tensor), dim=1)
                 # expand the latents if we are doing classifier free guidance
-                latent_model_input = torch.cat([latent_concat_1] * 2) if self.do_classifier_free_guidance else latents
-                latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
+                latent_model_input = (
+                    torch.cat([latent_concat_1] * 2)
+                    if self.do_classifier_free_guidance
+                    else latents
+                )
+                latent_model_input = self.scheduler.scale_model_input(
+                    latent_model_input, t
+                )
 
                 # predict the noise residual
                 noise_pred = self.unet(
@@ -1156,14 +1303,22 @@ class StableDiffusionITMPipeline(
                 # perform guidance
                 if self.do_classifier_free_guidance:
                     noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
-                    noise_pred = noise_pred_uncond + self.guidance_scale * (noise_pred_text - noise_pred_uncond)
+                    noise_pred = noise_pred_uncond + self.guidance_scale * (
+                        noise_pred_text - noise_pred_uncond
+                    )
 
                 if self.do_classifier_free_guidance and self.guidance_rescale > 0.0:
                     # Based on 3.4. in https://arxiv.org/pdf/2305.08891.pdf
-                    noise_pred = rescale_noise_cfg(noise_pred, noise_pred_text, guidance_rescale=self.guidance_rescale)
+                    noise_pred = rescale_noise_cfg(
+                        noise_pred,
+                        noise_pred_text,
+                        guidance_rescale=self.guidance_rescale,
+                    )
 
                 # compute the previous noisy sample x_t -> x_t-1
-                latents = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs, return_dict=False)[0]
+                latents = self.scheduler.step(
+                    noise_pred, t, latents, **extra_step_kwargs, return_dict=False
+                )[0]
 
                 if callback_on_step_end is not None:
                     callback_kwargs = {}
@@ -1173,15 +1328,19 @@ class StableDiffusionITMPipeline(
 
                     latents = callback_outputs.pop("latents", latents)
                     prompt_embeds = callback_outputs.pop("prompt_embeds", prompt_embeds)
-                    negative_prompt_embeds = callback_outputs.pop("negative_prompt_embeds", negative_prompt_embeds)
+                    negative_prompt_embeds = callback_outputs.pop(
+                        "negative_prompt_embeds", negative_prompt_embeds
+                    )
 
                 # call the callback, if provided
-                if i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0):
+                if i == len(timesteps) - 1 or (
+                    (i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0
+                ):
                     progress_bar.update()
                     if callback is not None and i % callback_steps == 0:
                         step_idx = i // getattr(self.scheduler, "order", 1)
                         callback(step_idx, t, latents)
-        
+
         latents_medium = latents
         # 8. Denoising loop expoure_low
         num_warmup_steps = len(timesteps) - num_inference_steps * self.scheduler.order
@@ -1191,10 +1350,16 @@ class StableDiffusionITMPipeline(
             for i, t in enumerate(timesteps):
                 if self.interrupt:
                     continue
-                latent_concat_2 = torch.concat((latents_low, latents_medium), dim = 1)
+                latent_concat_2 = torch.concat((latents_low, latents_medium), dim=1)
                 # expand the latents if we are doing classifier free guidance
-                latent_model_input = torch.cat([latent_concat_2] * 2) if self.do_classifier_free_guidance else latents_medium
-                latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
+                latent_model_input = (
+                    torch.cat([latent_concat_2] * 2)
+                    if self.do_classifier_free_guidance
+                    else latents_medium
+                )
+                latent_model_input = self.scheduler.scale_model_input(
+                    latent_model_input, t
+                )
 
                 # predict the noise residual
                 noise_pred = self.unet(
@@ -1210,14 +1375,22 @@ class StableDiffusionITMPipeline(
                 # perform guidance
                 if self.do_classifier_free_guidance:
                     noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
-                    noise_pred = noise_pred_uncond + self.guidance_scale * (noise_pred_text - noise_pred_uncond)
+                    noise_pred = noise_pred_uncond + self.guidance_scale * (
+                        noise_pred_text - noise_pred_uncond
+                    )
 
                 if self.do_classifier_free_guidance and self.guidance_rescale > 0.0:
                     # Based on 3.4. in https://arxiv.org/pdf/2305.08891.pdf
-                    noise_pred = rescale_noise_cfg(noise_pred, noise_pred_text, guidance_rescale=self.guidance_rescale)
+                    noise_pred = rescale_noise_cfg(
+                        noise_pred,
+                        noise_pred_text,
+                        guidance_rescale=self.guidance_rescale,
+                    )
 
                 # compute the previous noisy sample x_t -> x_t-1
-                latents_low = self.scheduler.step(noise_pred, t, latents_low, **extra_step_kwargs, return_dict=False)[0]
+                latents_low = self.scheduler.step(
+                    noise_pred, t, latents_low, **extra_step_kwargs, return_dict=False
+                )[0]
 
                 if callback_on_step_end is not None:
                     callback_kwargs = {}
@@ -1227,31 +1400,34 @@ class StableDiffusionITMPipeline(
 
                     latents_low = callback_outputs.pop("latents_low", latents_low)
                     prompt_embeds = callback_outputs.pop("prompt_embeds", prompt_embeds)
-                    negative_prompt_embeds = callback_outputs.pop("negative_prompt_embeds", negative_prompt_embeds)
+                    negative_prompt_embeds = callback_outputs.pop(
+                        "negative_prompt_embeds", negative_prompt_embeds
+                    )
 
                 # call the callback, if provided
-                if i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0):
+                if i == len(timesteps) - 1 or (
+                    (i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0
+                ):
                     progress_bar.update()
                     if callback is not None and i % callback_steps == 0:
                         step_idx = i // getattr(self.scheduler, "order", 1)
                         callback(step_idx, t, latents_low)
 
-
         if not output_type == "latent":
-            
-            pretrained_model_path = "../LEDiff_data/models/model_highlight/vae/merge_model.pth"#"/sensei-fs/users/wchao/Codes/diffusers/resutls/sd_model/StabelDiffusion_weights/vae/merge_model.pth"
+
+            pretrained_model_path = "../LEDiff_data/models/model_highlight/vae/merge_model.pth"  # "/sensei-fs/users/wchao/Codes/diffusers/resutls/sd_model/StabelDiffusion_weights/vae/merge_model.pth"
 
             # 实例化 FeatureFusion 类
             net = FeatureFusion(in_channels=4, kernel_size=1, padding=0).to(device)
-            net.load_pretrained_weights(pretrained_model_path, device = device)
+            net.load_pretrained_weights(pretrained_model_path, device=device)
             with torch.no_grad():
                 latent_merged, weights_map = net(latents_low, latents, latents_tensor)
                 # for i in range(4):
-                    # for j in range(3):  # 对应 feature_1, feature_2, feature_3 的三个权重图
-                        # channel_data = weights_map[0, i, j, :, :].detach().cpu().numpy()  # (H, W)
-                        # filename = f'/HPS/RawDiff/work/LED/test_results/itm_batch_rafal_overexposed_test_vannila_more_steps_1000_shift/{os.path.splitext(os.path.basename(img_name))[0]}_weight_map_feature_{j+1}_channel_{i+1}.exr'
-                        # save_weights_name = os.path.join(save_folder, filename)
-                        # cv2.imwrite(filename, channel_data.astype(np.float32))
+                # for j in range(3):  # 对应 feature_1, feature_2, feature_3 的三个权重图
+                # channel_data = weights_map[0, i, j, :, :].detach().cpu().numpy()  # (H, W)
+                # filename = f'/HPS/RawDiff/work/LED/test_results/itm_batch_rafal_overexposed_test_vannila_more_steps_1000_shift/{os.path.splitext(os.path.basename(img_name))[0]}_weight_map_feature_{j+1}_channel_{i+1}.exr'
+                # save_weights_name = os.path.join(save_folder, filename)
+                # cv2.imwrite(filename, channel_data.astype(np.float32))
                 # print(f'Saved {filename}')
 
             # print('self.vae.config.scaling_factor is', self.vae.config)
@@ -1263,8 +1439,7 @@ class StableDiffusionITMPipeline(
             # print(f"{name_tmp.replace('.npy', '_h_shift.npy')}")
             # np.save(f"{name_tmp.replace('.npy', '_h_shift.npy')}", latens_scaling_h)
 
-
-            # latens_scaling_m = (latents / self.vae.config.scaling_factor).squeeze(0).detach().cpu().numpy()            
+            # latens_scaling_m = (latents / self.vae.config.scaling_factor).squeeze(0).detach().cpu().numpy()
             # np.save(f"{name_tmp.replace('.npy', '_m_shift.npy')}", latens_scaling_m)
 
             # latens_scaling_l = (latents_low / self.vae.config.scaling_factor).squeeze(0).detach().cpu().numpy()
@@ -1273,31 +1448,35 @@ class StableDiffusionITMPipeline(
 
             # latents_scaling_merged = (latent_merged / self.vae.config.scaling_factor).squeeze(0).detach().cpu().numpy()
             # np.save(npy_save_name, latents_scaling_merged)
-            image = self.vae.decode(latent_merged / self.vae.config.scaling_factor, return_dict=False, generator=generator)[
-                0
-            ]
-            image_high = self.vae.decode(latents_tensor / self.vae.config.scaling_factor, return_dict=False, generator=generator)[
-                0
-            ]
+            image = self.vae.decode(
+                latent_merged / self.vae.config.scaling_factor,
+                return_dict=False,
+                generator=generator,
+            )[0]
+            image_high = self.vae.decode(
+                latents_tensor / self.vae.config.scaling_factor,
+                return_dict=False,
+                generator=generator,
+            )[0]
             latent_medium = latents / self.vae.config.scaling_factor
             # latent_medium[:2, :, :] -= 10   # 前两个通道
             # latent_medium[2:, :, :] += 10
-            image_medium = self.vae.decode(latent_medium, return_dict=False, generator=generator)[
-                0
-            ]
+            image_medium = self.vae.decode(
+                latent_medium, return_dict=False, generator=generator
+            )[0]
 
             latents_scaling_medium = (latent_medium).squeeze(0).detach().cpu().numpy()
-            np.save(npy_save_name, latents_scaling_medium)
+            # np.save(npy_save_name, latents_scaling_medium) # [Cheng]
 
             latents_low = latents_low / self.vae.config.scaling_factor
             # latents_low[0:1, :, :] -= 10   # 前两个通道
-            # latents_low[1:2, :, :] -= 20 
+            # latents_low[1:2, :, :] -= 20
             # latents_low[2:, :, :] -= 60
             # latents_low[3:4, :, :] += 18
             # print('llllllllllllll')
-            image_low = self.vae.decode(latents_low , return_dict=False, generator=generator)[
-                0
-            ]
+            image_low = self.vae.decode(
+                latents_low, return_dict=False, generator=generator
+            )[0]
 
             # latens_scaling_np = (latent_merged).squeeze(0).detach().cpu().numpy()
             # name_tmp = img_name.replace('png', 'npy')
@@ -1307,8 +1486,7 @@ class StableDiffusionITMPipeline(
             # print(f"{name_tmp.replace('.npy', '_h_re_ldr.npy')}")
             # np.save(f"{name_tmp.replace('.npy', '_h_re_ldr.npy')}", latens_scaling_h)
 
-
-            # latens_scaling_m = (latents).squeeze(0).detach().cpu().numpy()            
+            # latens_scaling_m = (latents).squeeze(0).detach().cpu().numpy()
             # np.save(f"{name_tmp.replace('.npy', '_m_re_ldr.npy')}", latens_scaling_m)
 
             # latens_scaling_l = (latents_low).squeeze(0).detach().cpu().numpy()
@@ -1326,7 +1504,9 @@ class StableDiffusionITMPipeline(
             # image_low = self.vae.decode(latents_low, return_dict=False, generator=generator)[
             #     0
             # ]
-            image  = torch.concatenate((image_tensor, image, image_high, image_medium, image_low), dim = 0)
+            image = torch.concatenate(
+                (image_tensor, image, image_high, image_medium, image_low), dim=0
+            )
             # image  = torch.concatenate((image, image, image_high, image_medium, image_low), dim = 0)
             # image, has_nsfw_concept = self.run_safety_checker(image, device, prompt_embeds.dtype)
             # image = self.image_processor.postprocess(image, output_type="np")
@@ -1336,15 +1516,17 @@ class StableDiffusionITMPipeline(
             has_nsfw_concept = None
 
         if has_nsfw_concept is None:
-            do_denormalize = [True] * image.shape[0]#[True] * image.shape[0]
+            do_denormalize = [True] * image.shape[0]  # [True] * image.shape[0]
         else:
             do_denormalize = [not has_nsfw for has_nsfw in has_nsfw_concept]
-        
+
         # print('do_denormalize is', do_denormalize)
-        image = self.image_processor.postprocess(image, output_type=output_type, do_denormalize=do_denormalize)
+        image = self.image_processor.postprocess(
+            image, output_type=output_type, do_denormalize=do_denormalize
+        )
         # print('img_normal min is', np.min(image))
         # print('img_normal max is', np.max(image))
-        print('image shape is', image.shape)
+        print("image shape is", image.shape)
 
         # Offload all models
         self.maybe_free_model_hooks()
@@ -1352,4 +1534,6 @@ class StableDiffusionITMPipeline(
         if not return_dict:
             return (image, has_nsfw_concept)
 
-        return StableDiffusionPipelineOutput(images=image, nsfw_content_detected=has_nsfw_concept)
+        return StableDiffusionPipelineOutput(
+            images=image, nsfw_content_detected=has_nsfw_concept
+        )
